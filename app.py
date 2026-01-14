@@ -15,7 +15,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Configuration - USE ENVIRONMENT VARIABLE FOR SECURITY!
-BOT_TOKEN = os.environ.get('BOT_TOKEN', 'YOUR_BOT_TOKEN_HERE')
+BOT_TOKEN = os.environ.get('8562585775:AAFOzbtE2xsqedrx-hj1LXfhmLvvnSetgxQ')
 
 class MentionBot:
     def __init__(self):
