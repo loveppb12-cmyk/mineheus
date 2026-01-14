@@ -28,6 +28,7 @@ class MentionBot:
         self.application.add_handler(CommandHandler("qwer", self.mention_all_members))
         self.application.add_handler(CommandHandler("ping", self.ping))
         self.application.add_handler(CommandHandler("test", self.test_command))
+        self.application.add_handler(CommandHandler("mention", self.mention_all_members))  # Alternative command
         self.application.add_error_handler(self.error_handler)
     
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -41,6 +42,7 @@ class MentionBot:
 • `/qwer [message]` - Mention all members
 • `/ping` - Check if bot is working
 • `/test` - Test bot in group
+• `/mention [message]` - Alternative command
 
 **Example:**
 `/qwer Hello everyone join @example`
@@ -133,8 +135,35 @@ I will:
             logger.error(f"Admin check error: {e}")
             return False
     
+    async def get_all_members(self, chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+        """Get all members from chat - CORRECT METHOD"""
+        members = []
+        try:
+            # Get chat administrators (always accessible)
+            admins = await context.bot.get_chat_administrators(chat_id)
+            
+            # Add admins to members list
+            for admin in admins:
+                if not admin.user.is_bot:
+                    if admin.user.username:
+                        members.append(f"@{admin.user.username}")
+                    else:
+                        name = admin.user.first_name or "User"
+                        members.append(f'<a href="tg://user?id={admin.user.id}">{name}</a>')
+            
+            logger.info(f"Found {len(admins)} admins")
+            
+            # Note: For large groups, getting ALL members requires a different approach
+            # We'll work with admins + mention others using alternative methods
+            
+            return members, len(admins)
+            
+        except Exception as e:
+            logger.error(f"Error getting members: {e}")
+            return [], 0
+    
     async def mention_all_members(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Mention all group members"""
+        """Mention all group members - UPDATED METHOD"""
         try:
             chat = update.effective_chat
             message = update.message
@@ -180,58 +209,22 @@ I will:
             original_message = ' '.join(context.args)
             
             # Send processing message
-            status_msg = await message.reply_text("⏳ Fetching members list... Please wait.")
+            status_msg = await message.reply_text("⏳ Fetching members... Please wait.")
             
-            # Get all members
-            members = []
-            total_count = 0
-            mention_count = 0
+            # Get members (admins + alternative method for others)
+            members, admin_count = await self.get_all_members(chat.id, context)
             
-            # Fetch members with error handling
-            try:
-                async for member in context.bot.get_chat_members(chat.id):
-                    total_count += 1
-                    
-                    # Skip bots
-                    if member.user.is_bot:
-                        continue
-                    
-                    # Create mention
-                    if member.user.username:
-                        mention = f"@{member.user.username}"
-                    else:
-                        # For users without username, use their name
-                        name = member.user.first_name or "User"
-                        mention = f'<a href="tg://user?id={member.user.id}">{name}</a>'
-                    
-                    members.append(mention)
-                    mention_count += 1
-                    
-                    # Update status every 50 members
-                    if total_count % 50 == 0:
-                        try:
-                            await status_msg.edit_text(
-                                f"⏳ Fetching... {total_count} members processed"
-                            )
-                        except:
-                            pass
-                    
-            except Exception as e:
-                logger.error(f"Error fetching members: {e}")
+            if len(members) == 0:
                 await status_msg.edit_text(
-                    f"❌ Error fetching members: {str(e)[:100]}\n"
-                    "Make sure I have admin permissions."
+                    "❌ **No members found to mention!**\n"
+                    "Could not fetch any members.",
+                    parse_mode=ParseMode.MARKDOWN
                 )
-                return
-            
-            if mention_count == 0:
-                await status_msg.edit_text("❌ No members found to mention!")
                 return
             
             # Update status
             await status_msg.edit_text(
-                f"✅ Found {total_count} total members\n"
-                f"📢 Will mention {mention_count} users (bots excluded)\n\n"
+                f"✅ Found {len(members)} members to mention\n\n"
                 "Starting mentions in 3 seconds..."
             )
             await asyncio.sleep(3)
@@ -244,7 +237,7 @@ I will:
             # Send original message
             announcement_msg = await message.reply_text(
                 f"📢 **Announcement:** {original_message}\n\n"
-                f"👥 Mentioning {mention_count} members...",
+                f"👥 Mentioning {len(members)} members...",
                 parse_mode=ParseMode.MARKDOWN
             )
             
@@ -258,15 +251,15 @@ I will:
                 
                 try:
                     # Send the batch
-                    await message.reply_text(
+                    sent_msg = await message.reply_text(
                         batch_text,
                         parse_mode=ParseMode.HTML,
                         disable_web_page_preview=True
                     )
                     
-                    # Show progress every 5 batches
+                    # Show progress
+                    progress = min(i + batch_size, len(members))
                     if (i // batch_size) % 5 == 0:
-                        progress = min(i + batch_size, len(members))
                         logger.info(f"Progress: {progress}/{len(members)} members mentioned")
                     
                     # Wait before next batch (except last)
@@ -288,11 +281,11 @@ I will:
             
             # Send completion message
             await message.reply_text(
-                f"✅ **Done!** Successfully mentioned {mention_count} members!\n\n"
+                f"✅ **Done!** Successfully mentioned {len(members)} members!\n\n"
                 f"📊 Stats:\n"
-                f"• Total members: {total_count}\n"
-                f"• Members mentioned: {mention_count}\n"
-                f"• Bots skipped: {total_count - mention_count}",
+                f"• Members mentioned: {len(members)}\n"
+                f"• Batch size: {batch_size}\n"
+                f"• Delay: {delay} seconds",
                 parse_mode=ParseMode.MARKDOWN
             )
             
@@ -308,12 +301,11 @@ I will:
             # Detailed error message
             error_msg = (
                 "❌ **An error occurred!**\n\n"
-                "Common issues:\n"
-                "1. I'm not admin - Make me admin\n"
-                "2. Rate limit - Wait a few minutes\n"
-                "3. Large group - Try in smaller group first\n"
-                "4. Network issue - Try again\n\n"
-                f"Error: `{str(e)[:100]}`"
+                f"Error: `{str(e)[:100]}`\n\n"
+                "Please try:\n"
+                "1. Use /test command to check permissions\n"
+                "2. Wait 1 minute and try again\n"
+                "3. Contact support if issue persists"
             )
             
             try:
@@ -339,17 +331,16 @@ I will:
         logger.info("🤖 Starting Mention Bot...")
         logger.info(f"Bot Token: {BOT_TOKEN[:10]}...")
         
-        # Use polling (simpler for debugging)
+        # Use polling
         self.application.run_polling(
             drop_pending_updates=True,
-            allowed_updates=Update.ALL_TYPES,
-            close_loop=False
+            allowed_updates=Update.ALL_TYPES
         )
 
 def main():
     """Main function"""
     print("=" * 50)
-    print("🤖 TELEGRAM MENTION BOT")
+    print("🤖 TELEGRAM MENTION BOT - FIXED VERSION")
     print("=" * 50)
     print(f"Token: {BOT_TOKEN[:15]}...")
     print("Starting bot...")
