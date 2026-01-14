@@ -29,8 +29,7 @@ class MentionBot:
     
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Send welcome message"""
-        welcome_text = """
-🤖 **Group Mention Bot**
+        welcome_text = """🤖 **Group Mention Bot**
 
 **Command:** `/qwer your message`
 
