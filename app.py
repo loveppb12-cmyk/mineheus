@@ -1,25 +1,28 @@
 import os
 import asyncio
 import logging
+import time
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
-from telegram.constants import ParseMode, ChatMemberStatus
-from telegram.error import TelegramError
+from telegram.constants import ParseMode
+from telegram.error import TelegramError, RetryAfter, BadRequest
 
-# Enable detailed logging
+# Enhanced logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Configuration - REPLACE WITH YOUR TOKEN
-BOT_TOKEN = "8562585775:AAFOzbtE2xsqedrx-hj1LXfhmLvvnSetgxQ"  # ⚠️ Change this in production!
+# Configuration - USE ENVIRONMENT VARIABLE FOR SECURITY!
+BOT_TOKEN = os.environ.get('BOT_TOKEN', 'YOUR_BOT_TOKEN_HERE')
 
 class MentionBot:
     def __init__(self):
         self.application = Application.builder().token(BOT_TOKEN).build()
         self.setup_handlers()
+        self.processing_groups = set()
+        self.user_cache = {}
         
     def setup_handlers(self):
         """Setup command handlers"""
@@ -27,246 +30,291 @@ class MentionBot:
         self.application.add_handler(CommandHandler("help", self.help_command))
         self.application.add_handler(CommandHandler("qwer", self.mention_all_members))
         self.application.add_handler(CommandHandler("ping", self.ping))
+        self.application.add_handler(CommandHandler("stats", self.get_stats))
         self.application.add_error_handler(self.error_handler)
     
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Send welcome message"""
         welcome_text = """
-🤖 **Group Mention Bot is Active!**
+🤖 **Mass Mention Bot**
 
 **Commands:**
 • `/start` - Show this message
-• `/help` - Help & instructions
+• `/help` - Detailed instructions
 • `/qwer [message]` - Mention all members
-• `/ping` - Check if bot is working
+• `/ping` - Check bot status
+• `/stats` - Get group statistics
 
 **Example:**
-`/qwer Hello everyone join @example`
+`/qwer Important announcement for all members!`
 
-**Note:** Bot needs admin rights to fetch all members.
+⚠️ **Requires Admin Rights**
         """
         await update.message.reply_text(welcome_text, parse_mode=ParseMode.MARKDOWN)
     
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Send help message"""
         help_text = """
-📚 **How to use:**
+📚 **MASS MENTION BOT - User Guide**
 
-1. Add me to your group
-2. Make me **admin** (important!)
-3. Use: `/qwer your message here`
+**For Group Admins:**
+1. **Add bot to group**
+2. **Make bot ADMIN** with permissions
+3. **Usage:** `/qwer your message here`
 
-**Example:**
-`/qwer Important announcement!`
+**Example:** `/qwer Join our new channel @example`
 
-I will:
-1. Post your message
-2. Mention all members in groups of 5
-3. Wait 5 seconds between groups
+**How it works:**
+1. Fetches all members
+2. Mentions in batches
+3. Skips bots
+4. Automatic rate limit handling
 
-⚠️ **Requirements:**
-• I must be admin in the group
-• Works in groups/supergroups only
-• I skip bots automatically
+**For best results:**
+- Use in supergroups
+- Test with small group first
+- Don't spam (once per hour recommended)
         """
         await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
     
     async def ping(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Check if bot is alive"""
-        await update.message.reply_text("🏓 Pong! Bot is alive and working!")
+        """Check bot status"""
+        await update.message.reply_text("✅ Bot is active and ready!")
     
-    async def check_bot_admin(self, chat_id: int, bot_id: int, context) -> bool:
-        """Check if bot is admin in the chat"""
+    async def get_stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Get group statistics"""
+        chat = update.effective_chat
+        
+        # Check if group
+        if chat.type not in ['group', 'supergroup']:
+            await update.message.reply_text("❌ This command works in groups only!")
+            return
+        
         try:
-            chat_member = await context.bot.get_chat_member(chat_id, bot_id)
-            return chat_member.status in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]
-        except Exception as e:
-            logger.error(f"Admin check error: {e}")
-            return False
-    
-    async def mention_all_members(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Mention all group members"""
-        try:
-            chat = update.effective_chat
-            message = update.message
-            
-            # Check if in group
-            if chat.type not in [ChatType.GROUP, ChatType.SUPERGROUP]:
-                await message.reply_text("❌ This command only works in groups!")
-                return
-            
-            # Check if message has text after command
-            if not context.args:
-                await message.reply_text(
-                    "❌ Please add a message!\n\n"
-                    "Example: `/qwer Hello everyone!`\n"
-                    "Example: `/qwer Join my group @channel`",
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                return
-            
             # Get bot info
             bot_info = await context.bot.get_me()
-            bot_id = bot_info.id
             
-            # Check if bot is admin
-            is_admin = await self.check_bot_admin(chat.id, bot_id, context)
-            if not is_admin:
-                await message.reply_text(
-                    "⚠️ **I need to be admin to mention everyone!**\n\n"
-                    "Please make me admin in this group settings.\n"
-                    "Without admin rights, I can't fetch member list.",
+            # Check if admin
+            try:
+                chat_member = await context.bot.get_chat_member(chat.id, bot_info.id)
+                is_admin = chat_member.status in ['administrator', 'creator']
+            except:
+                is_admin = False
+            
+            stats_text = f"""
+📊 **Group Statistics:**
+
+• **Group:** {chat.title}
+• **Type:** {'Supergroup' if chat.type == 'supergroup' else 'Group'}
+• **Bot Status:** {'✅ Admin' if is_admin else '❌ Not Admin'}
+• **Processing:** {'✅ Available' if chat.id not in self.processing_groups else '⏳ Busy'}
+            """
+            
+            await update.message.reply_text(stats_text, parse_mode=ParseMode.MARKDOWN)
+            
+        except Exception as e:
+            logger.error(f"Stats error: {e}")
+            await update.message.reply_text("❌ Could not fetch statistics")
+    
+    async def is_bot_admin(self, chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
+        """Check if bot is admin"""
+        try:
+            bot_info = await context.bot.get_me()
+            chat_member = await context.bot.get_chat_member(chat_id, bot_info.id)
+            return chat_member.status in ['administrator', 'creator']
+        except Exception as e:
+            logger.error(f"Admin check failed: {e}")
+            return False
+    
+    def get_user_mention(self, user):
+        """Get mention for a user"""
+        if user.username:
+            return f"@{user.username}"
+        else:
+            name = user.first_name or user.last_name or "User"
+            return f'<a href="tg://user?id={user.id}">{name}</a>'
+    
+    async def mention_all_members(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Main mention function"""
+        chat = update.effective_chat
+        message = update.message
+        
+        # Check if in group
+        if chat.type not in ['group', 'supergroup']:
+            await message.reply_text("❌ This command works in groups only!")
+            return
+        
+        # Check admin status
+        if not await self.is_bot_admin(chat.id, context):
+            admin_instructions = """
+⚠️ **BOT NEEDS ADMIN RIGHTS!**
+
+To make me admin:
+1. Go to group settings
+2. Tap "Administrators"
+3. Tap "Add Admin"
+4. Select me (the bot)
+5. Enable these permissions:
+   • Delete messages
+   • Ban users
+   • Invite users via link
+
+Then try the command again.
+            """
+            await message.reply_text(admin_instructions, parse_mode=ParseMode.MARKDOWN)
+            return
+        
+        # Get message
+        if not context.args:
+            await message.reply_text(
+                "❌ Please add your message!\n\n"
+                "**Format:** `/qwer your message here`\n"
+                "**Example:** `/qwer Important announcement!`",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        
+        original_message = ' '.join(context.args)
+        
+        # Send initial status
+        status_msg = await message.reply_text(
+            "⏳ **Starting mass mention...**\n"
+            "Fetching members list...",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        try:
+            # Fetch members
+            members = []
+            fetched_count = 0
+            
+            async for member in context.bot.get_chat_members(chat.id):
+                fetched_count += 1
+                if not member.user.is_bot:
+                    members.append(self.get_user_mention(member.user))
+            
+            if not members:
+                await status_msg.edit_text(
+                    "❌ **No members found to mention!**\n"
+                    "All members might be bots.",
                     parse_mode=ParseMode.MARKDOWN
                 )
-                return
-            
-            # Get original message
-            original_message = ' '.join(context.args)
-            
-            # Send processing message
-            status_msg = await message.reply_text("⏳ Fetching members list...")
-            
-            # Get all members
-            members = []
-            total_count = 0
-            mention_count = 0
-            
-            # Fetch members with error handling
-            try:
-                async for member in context.bot.get_chat_members(chat.id):
-                    total_count += 1
-                    
-                    # Skip bots
-                    if member.user.is_bot:
-                        continue
-                    
-                    # Create mention
-                    if member.user.username:
-                        mention = f"@{member.user.username}"
-                    else:
-                        # For users without username, use their name
-                        name = member.user.first_name or "User"
-                        mention = f"[{name}](tg://user?id={member.user.id})"
-                    
-                    members.append(mention)
-                    mention_count += 1
-                    
-            except Exception as e:
-                logger.error(f"Error fetching members: {e}")
-                await status_msg.edit_text(
-                    f"❌ Error fetching members: {str(e)[:100]}\n"
-                    "Make sure I have admin permissions."
-                )
-                return
-            
-            if mention_count == 0:
-                await status_msg.edit_text("❌ No members found to mention!")
                 return
             
             # Update status
             await status_msg.edit_text(
-                f"✅ Found {total_count} total members\n"
-                f"📢 Will mention {mention_count} users (bots excluded)\n\n"
-                "Starting mentions in 3 seconds..."
+                f"✅ **Ready to mention!**\n\n"
+                f"• Members found: {len(members)}\n"
+                f"• Starting mentions...",
+                parse_mode=ParseMode.MARKDOWN
             )
+            
             await asyncio.sleep(2)
             
             # Send original message
             await message.reply_text(
-                f"📢 **Announcement:** {original_message}\n\n"
-                f"👥 Mentioning {mention_count} members...",
+                f"📢 **ANNOUNCEMENT**\n\n{original_message}\n\n"
+                f"👥 Mentioning {len(members)} members...",
                 parse_mode=ParseMode.MARKDOWN
             )
             
             # Mention in batches
             batch_size = 5
-            delay = 5  # seconds between batches
+            delay_between_batches = 5
+            successful_mentions = 0
             
             for i in range(0, len(members), batch_size):
                 batch = members[i:i + batch_size]
-                batch_text = " ".join(batch)
+                mention_text = " ".join(batch)
                 
                 try:
-                    # Send the batch
+                    # Send batch
                     await message.reply_text(
-                        batch_text,
-                        parse_mode=ParseMode.MARKDOWN,
+                        mention_text,
+                        parse_mode=ParseMode.HTML,
                         disable_web_page_preview=True
                     )
                     
-                    # Show progress
-                    progress = min(i + batch_size, len(members))
-                    logger.info(f"Progress: {progress}/{len(members)} members mentioned")
+                    successful_mentions += len(batch)
                     
-                    # Wait before next batch (except last)
+                    # Wait between batches
                     if i + batch_size < len(members):
-                        await asyncio.sleep(delay)
+                        await asyncio.sleep(delay_between_batches)
                         
+                except RetryAfter as e:
+                    # Rate limited
+                    wait_time = e.retry_after
+                    await asyncio.sleep(wait_time)
+                    # Retry same batch
+                    i -= batch_size
+                    continue
+                    
                 except Exception as e:
-                    logger.error(f"Error sending batch {i}: {e}")
-                    # Continue with next batch
+                    logger.error(f"Error sending batch: {e}")
                     continue
             
             # Send completion message
-            await message.reply_text(
-                f"✅ **Done!** Successfully mentioned {mention_count} members!\n\n"
-                f"📊 Stats:\n"
-                f"• Total members: {total_count}\n"
-                f"• Members mentioned: {mention_count}\n"
-                f"• Bots skipped: {total_count - mention_count}",
-                parse_mode=ParseMode.MARKDOWN
-            )
+            completion_text = f"""
+✅ **MENTION COMPLETED!**
+
+📊 **Statistics:**
+• Total members mentioned: {successful_mentions}
+
+📢 **Message sent:**
+{original_message}
+            """
+            
+            await message.reply_text(completion_text, parse_mode=ParseMode.MARKDOWN)
             
         except Exception as e:
-            logger.error(f"Unexpected error in mention_all_members: {e}", exc_info=True)
+            logger.error(f"Error: {e}", exc_info=True)
             
-            # Detailed error message
-            error_msg = (
-                "❌ **An error occurred!**\n\n"
-                "Common issues:\n"
-                "1. I'm not admin - Make me admin\n"
-                "2. Group is too large - Try in smaller group\n"
-                "3. Rate limit - Wait a few minutes\n"
-                "4. Privacy settings - Some users can't be mentioned\n\n"
-                f"Error: `{str(e)[:100]}`"
-            )
+            error_message = f"""
+❌ **ERROR OCCURRED**
+
+**Error:** `{str(e)[:100]}`
+
+**Possible solutions:**
+1. Check if bot is still admin
+2. Wait 5 minutes and try again
+3. Try in smaller group first
+            """
             
             try:
-                await update.message.reply_text(error_msg, parse_mode=ParseMode.MARKDOWN)
+                await message.reply_text(error_message, parse_mode=ParseMode.MARKDOWN)
             except:
                 pass
     
     async def error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE):
-        """Log errors"""
-        logger.error(f"Exception while handling update: {context.error}", exc_info=True)
+        """Global error handler"""
+        logger.error(f"Error: {context.error}", exc_info=True)
         
-        # Try to send error message
+        # Try to notify user
         try:
-            if isinstance(update, Update) and update.effective_message:
-                await update.effective_message.reply_text(
-                    "⚠️ An error occurred. Please check if I'm admin and try again."
-                )
+            if update and hasattr(update, 'effective_message'):
+                error_msg = "⚠️ An error occurred. Please try again."
+                await update.effective_message.reply_text(error_msg)
         except:
             pass
     
     def run(self):
-        """Run the bot"""
-        logger.info("🤖 Starting Mention Bot...")
-        logger.info(f"Bot username: (will be fetched on startup)")
+        """Start the bot"""
+        logger.info("🚀 Starting Mass Mention Bot...")
+        logger.info("✅ Bot is ready")
         
-        # Use polling (simpler for debugging)
+        # Start polling
         self.application.run_polling(
             drop_pending_updates=True,
-            allowed_updates=Update.ALL_TYPES,
-            close_loop=False
+            allowed_updates=Update.ALL_TYPES
         )
 
 def main():
-    """Main function"""
-    # Check token
-    if not BOT_TOKEN or "YOUR_BOT_TOKEN_HERE" in BOT_TOKEN:
-        print("❌ ERROR: Please set your BOT_TOKEN in the code")
-        print("Replace the BOT_TOKEN variable with your actual token")
+    """Entry point"""
+    # Security check - REPLACE WITH YOUR TOKEN
+    ACTUAL_TOKEN = "8562585775:AAFOzbtE2xsqedrx-hj1LXfhmLvvnSetgxQ"
+    
+    if ACTUAL_TOKEN == 'YOUR_BOT_TOKEN_HERE':
+        print("❌ ERROR: Please replace ACTUAL_TOKEN with your bot token!")
         return
     
     # Create and run bot
